@@ -48,7 +48,7 @@ def calibrateCam(imgPath, nx=9, ny=6):
 
     return mtx, dist
 
-def undistorImage(rawImage, mtx, dist):
+def undistortImage(rawImage, mtx, dist):
     undistImg = currentImageOut = cv2.undistort(rawImage, mtx, dist, None, mtx)
     return undistImg
 
@@ -81,9 +81,9 @@ def getBinaryImg(imgIn):
 
     return mask_merged
 
-def getMatrices(imgIn):
-    xsize = imgIn.shape[1]
-    ysize = imgIn.shape[0]
+def getMatrices(shape = (720, 1280)):
+    xsize = shape[1]
+    ysize = shape[0]
 
     # set source and destination points for the perspective transform
     x_magin_bottom = 0.2 * xsize / 2
@@ -210,30 +210,70 @@ def fitPolynomial(imgIn):
     ploty = np.linspace(0, imgIn.shape[0] - 1, imgIn.shape[0])
     if (not len(lefty)) <= 0 and (not len(leftx) <= 0):
         left_fit = np.polyfit(lefty, leftx, 2)
-        left_fitx = left_fit[0] * ploty ** 2 + left_fit[1] * ploty + left_fit[2]
+        #left_fitx = left_fit[0] * ploty ** 2 + left_fit[1] * ploty + left_fit[2]
         out_img[lefty, leftx] = [255, 0, 0]
     if (not len(righty)) <= 0 and (not len(rightx) <= 0):
         right_fit = np.polyfit(righty, rightx, 2)
-        right_fitx = right_fit[0] * ploty ** 2 + right_fit[1] * ploty + right_fit[2]
+        #right_fitx = right_fit[0] * ploty ** 2 + right_fit[1] * ploty + right_fit[2]
         out_img[righty, rightx] = [0, 0, 255]
+
+    # Generate an overlay with the fitted ploynoms
+    #xdim_overlay = np.int32(max([max(left_fitx), max(right_fitx), imgIn.shape[1]]))
+    #ydim_overlay = np.int32(imgIn.shape[0])
+    #lineOverlay = np.uint8(np.zeros([imgIn.shape[0], imgIn.shape[1]]))
+
+    '''''''''
+    for ii in zip(np.int32(ploty), np.int32(right_fitx)):
+        if ii[1] < imgIn.shape[1]:
+            out_img[ii] = [255, 255, 0]
+    for ii in zip(np.int32(ploty), np.int32(left_fitx)):
+        if ii[1] < imgIn.shape[1]:
+            out_img[ii] = [255, 255, 0]
+    '''''''''
+
+    return left_fit, right_fit, out_img
+
+def drawLane(imgIn, left_fit, right_fit, invTransformationMatrix):
+
+    ploty = np.linspace(0, imgIn.shape[0] - 1, imgIn.shape[0])
+    # not empty check!!!
+    left_fitx = left_fit[0] * ploty ** 2 + left_fit[1] * ploty + left_fit[2]
+    right_fitx = right_fit[0] * ploty ** 2 + right_fit[1] * ploty + right_fit[2]
 
     # Generate an overlay with the fitted ploynoms
     xdim_overlay = np.int32(max([max(left_fitx), max(right_fitx), imgIn.shape[1]]))
     ydim_overlay = np.int32(imgIn.shape[0])
-    lineOverlay = np.uint8(np.zeros([imgIn.shape[0], imgIn.shape[1]]))
+    lineMaskWarped = np.uint8(np.zeros([imgIn.shape[0], imgIn.shape[1]]))
 
     for ii in zip(np.int32(ploty), np.int32(right_fitx)):
         if ii[1] < imgIn.shape[1]:
-            out_img[ii] = [255, 255, 0]
-            lineOverlay[ii] = 1
+            #out_img[ii] = [255, 255, 0]
+            lineMaskWarped[ii] = 1
     for ii in zip(np.int32(ploty), np.int32(left_fitx)):
         if ii[1] < imgIn.shape[1]:
-            out_img[ii] = [255, 255, 0]
-            lineOverlay[ii] = 1
+            #out_img[ii] = [255, 255, 0]
+            lineMaskWarped[ii] = 1
 
-    return out_img, left_fit, right_fit, ploty, lineOverlay
+    lineMask = perspectiveTransform(lineMaskWarped, invTransformationMatrix)
+    # Drwaw lines
+    imgIn[np.nonzero(lineMask)] = [255, 255, 0]
 
-def measureCurvature(ploty, left_fit, right_fit):
+    # Fill the lane area
+    # Recast the x and y points into usable format for cv2.fillPoly()
+    laneMaskWarped = np.uint8(np.zeros([imgIn.shape[0], imgIn.shape[1]]))
+    laneMaskWarped = np.zeros_like(imgIn)
+    pts_left = np.array([np.transpose(np.vstack([left_fitx, ploty]))])
+    pts_right = np.array([np.flipud(np.transpose(np.vstack([right_fitx, ploty])))])
+    pts = np.hstack((pts_left, pts_right))
+    cv2.fillPoly(laneMaskWarped, np.int_([pts]), (0,255,0))
+    laneMask = perspectiveTransform(laneMaskWarped, invTransformationMatrix)
+    #imgIn[np.nonzero(laneMask)] = [0,255,0]
+
+    imgOut = cv2.addWeighted(imgIn, 1, laneMask, 0.3, 0)
+
+    return imgOut
+
+def measureCurvature(ymax, left_fit, right_fit):
     '''
     Calculates the curvature of polynomial functions in pixels.
     '''
@@ -241,19 +281,16 @@ def measureCurvature(ploty, left_fit, right_fit):
     ym_per_pix = 30 / 720  # meters per pixel in y dimension
     xm_per_pix = 3.7 / 700  # meters per pixel in x dimension
 
-    # Define y-value where we want radius of curvature
-    # We'll choose the maximum y-value, corresponding to the bottom of the image
-    y_eval = np.max(ploty)
 
     ##### TO-DO: Implement the calculation of R_curve (radius of curvature) #####
     left_curverad = 0
     right_curverad = 0
     if not len(left_fit) <= 0:
         #left_curverad = ((1 + (2 * left_fit[0] * y_eval + left_fit[1]) ** 2) ** 1.5) / np.absolute(2 * left_fit[0])
-        left_curverad = ((1 + (2 * left_fit[0] * ym_per_pix * y_eval + left_fit[1]) ** 2) ** 1.5) / np.absolute(2 * left_fit[0])
+        left_curverad = ((1 + (2 * left_fit[0] * ym_per_pix * ymax + left_fit[1]) ** 2) ** 1.5) / np.absolute(2 * left_fit[0])
     if not len(right_fit) <= 0:
         #right_curverad = ((1 + (2 * right_fit[0] * y_eval + right_fit[1]) ** 2) ** 1.5) / np.absolute(2 * right_fit[0])
-        right_curverad = ((1 + (2 * right_fit[0] * ym_per_pix * y_eval + right_fit[1]) ** 2) ** 1.5) / np.absolute(2 * right_fit[0])
+        right_curverad = ((1 + (2 * right_fit[0] * ym_per_pix * ymax + right_fit[1]) ** 2) ** 1.5) / np.absolute(2 * right_fit[0])
 
     return left_curverad, right_curverad
 
@@ -262,10 +299,10 @@ def get_car_x_offset(dim, left_fit, right_fit):
     ymax = dim[0]
     xmax = dim[1]
 
-    if (not len(ploty)) <= 0 and (not len(left_fit) <= 0):
+    if (not len(left_fit) <= 0):
         left_line_point = left_fit[0] * (ymax - 1) ** 2 + left_fit[1] * (ymax - 1) + left_fit[2]
 
-    if (not len(ploty)) <= 0 and (not len(right_fit) <= 0):
+    if (not len(right_fit) <= 0):
         right_line_point = right_fit[0] * (ymax - 1) ** 2 + right_fit[1] * (ymax - 1) + right_fit[2]
 
     x_offset = xm_per_pix * (((right_line_point + left_line_point) // 2) - (xmax // 2))
@@ -275,14 +312,47 @@ def weighted_img(img, initial_img, α=0.8, β=1., γ=0.):
     return cv2.addWeighted(initial_img, α, img, β, γ)
 
 
+# Set all values which are defined only once as global variables
 
+# Do calibration: Get distortion parameters and camera matrix
+mtx, dist = calibrateCam('camera_cal/')
+transformationMatrix, invTransformationMatrix = getMatrices()  # GLOBAL!!!!
 
+def processImage(imgIn, isSingleImage=False):
+    currentUndisImg = undistortImage(imgIn, mtx, dist)
 
+    # Get gradient binary image
+    binaryImg = getBinaryImg(currentUndisImg)
+
+    # Get warped image, ROI is a trapezoid
+    warpedBinaryImg = perspectiveTransform(binaryImg, transformationMatrix)
+
+    # Fit lane lines by fitting 2nd oder polynomial
+    left_fit, right_fit, highlightedWarpedImg = fitPolynomial(warpedBinaryImg)
+
+    # Get the curvature of each lane line
+    left_curverad, right_curverad = measureCurvature(warpedBinaryImg.shape[1], left_fit, right_fit)
+
+    # Get cars x offset
+    x_offset = get_car_x_offset(warpedBinaryImg.shape, left_fit, right_fit)
+
+    # Unwarp the line mask we fond
+    ImgOut = drawLane(currentUndisImg, left_fit, right_fit, invTransformationMatrix)
+
+    # Print out some parameters and also save all intermediate steps of the pipeline if function used on singel imgs
+    if isSingleImage == True:
+        print(currentTestImgfile + ': curvature left [m] = ' + str(left_curverad) + '   curvature right [m] = ' + str(
+            right_curverad))
+        print(currentTestImgfile + ' delta x of car to lane center [m] = ' + str(x_offset))
+        cv2.imwrite('output_images/' + 'undis_' + currentTestImgfile, currentUndisImg)
+        cv2.imwrite('output_images/' + 'bin_' + currentTestImgfile, binaryImg * 255)
+        cv2.imwrite('output_images/' + 'warp_' + currentTestImgfile, warpedBinaryImg * 255)
+        cv2.imwrite('output_images/' + 'highlightet_' + currentTestImgfile, highlightedWarpedImg)
+        cv2.imwrite('output_images/' + 'out_' + currentTestImgfile, ImgOut)
+
+    return ImgOut
 
 if __name__ == "__main__":
-
-    # Do calibration: Get distortion parameters and camera matrix
-    mtx, dist = calibrateCam('camera_cal/')
 
     testImgFiles = os.listdir('test_images/')
     for currentTestImgfile in testImgFiles:
@@ -291,33 +361,4 @@ if __name__ == "__main__":
             continue
 
         currentTestImg = cv2.imread('test_images/' + currentTestImgfile)
-        currentUndisImg = undistorImage(currentTestImg, mtx, dist)
-
-        # Get gradient binary image
-        binaryImg = getBinaryImg(currentUndisImg)
-
-        # Get warped image, ROI is a trapezoid
-        transformationMatrix, invTransformationMatrix = getMatrices(binaryImg)
-        warpedBinaryImg = perspectiveTransform(binaryImg, transformationMatrix)
-
-        # Fit lane lines by fitting 2nd oder polynomial
-        highlightedImg, left_fit, right_fit, ploty, lineOverlayWarped = fitPolynomial(warpedBinaryImg)
-
-        # Get the curvature of each lane line
-        left_curverad, right_curverad = measureCurvature(ploty, left_fit, right_fit)
-        print(currentTestImgfile + ': curvature left [m] = ' + str(left_curverad) + '   curvature right [m] = ' + str(right_curverad))
-
-        # Get cars x offset
-        x_offset = get_car_x_offset(warpedBinaryImg.shape, left_fit, right_fit)
-        print(currentTestImgfile + ' delta x of car to lane center [m] = ' + str(x_offset))
-
-        # Unwarp the line overlay we fond
-        UnwarpedOverlay = perspectiveTransform(lineOverlayWarped, invTransformationMatrix)
-        UnwarpedImgOut = weighted_img(currentUndisImg, cv2.cvtColor(UnwarpedOverlay*255, cv2.COLOR_GRAY2BGR))
-        UnwarpedImgOut = cv2.cvtColor(UnwarpedOverlay*255, cv2.COLOR_GRAY2BGR)
-
-        cv2.imwrite('output_images/' + 'undis_' + currentTestImgfile, currentUndisImg)
-        cv2.imwrite('output_images/' + 'bin_' + currentTestImgfile, binaryImg * 255)
-        cv2.imwrite('output_images/' + 'warp_' + currentTestImgfile, warpedBinaryImg * 255)
-        cv2.imwrite('output_images/' + 'highlightet_' + currentTestImgfile, highlightedImg)
-        cv2.imwrite('output_images/' + 'highlightet_unwarped_' + currentTestImgfile, UnwarpedImgOut)
+        processImage(currentTestImg, True)

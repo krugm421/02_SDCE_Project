@@ -7,16 +7,14 @@ from moviepy.editor import VideoFileClip
 
 import AdvancedLaneFinding
 
-# Perform calibration
-mtx, dist = AdvancedLaneFinding.calibrateCam('camera_cal/')
-
-def processImage(imgIn):
 
 
 if __name__ == '__main__':
 
-
-
-    # Load
+    # Load video
     videoFile = "project_video.mp4"
     vid = VideoFileClip(videoFile)
+    white_clip = vid.fl_image(AdvancedLaneFinding.processImage)  # NOTE: this function expects color images!!
+    white_clip.write_videofile("out_" + videoFile, audio=False)
+
+
