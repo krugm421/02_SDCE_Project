@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
 import os
 
+
 DEBUG_FLAG = True
 
 
@@ -47,7 +48,6 @@ def calibrateCam(imgPath, nx=9, ny=6):
 
     return mtx, dist
 
-
 def undistorImage(rawImage, mtx, dist):
     undistImg = currentImageOut = cv2.undistort(rawImage, mtx, dist, None, mtx)
     return undistImg
@@ -81,13 +81,13 @@ def getBinaryImg(imgIn):
 
     return mask_merged
 
-def perspectiveTransform(imgIn):
+def getMatrices(imgIn):
     xsize = imgIn.shape[1]
     ysize = imgIn.shape[0]
 
     # set source and destination points for the perspective transform
-    x_magin_bottom = 0.2 * xsize/2
-    x_magin_top = 0.8 * xsize/2
+    x_magin_bottom = 0.2 * xsize / 2
+    x_magin_top = 0.85 * xsize / 2
     y_hight = 0.6 * ysize
     src = np.array([
         [0, ysize - 1],
@@ -103,6 +103,15 @@ def perspectiveTransform(imgIn):
 
     # Get transform matrix and warp image
     transformationMatrix = cv2.getPerspectiveTransform(src, dst)
+    invTransformationMatrix = cv2.getPerspectiveTransform(dst, src)
+
+
+    return transformationMatrix, invTransformationMatrix
+
+def perspectiveTransform(imgIn, transformationMatrix):
+    xsize = imgIn.shape[1]
+    ysize = imgIn.shape[0]
+
     warped = cv2.warpPerspective(imgIn, transformationMatrix, (xsize, ysize), flags=cv2.INTER_LINEAR)
 
     return warped
@@ -145,11 +154,11 @@ def findLanePixels(imgIn):
         win_y_low = imgIn.shape[0] - (window + 1) * window_height
         win_y_high = imgIn.shape[0] - window * window_height
         ### TO-DO: Find the four below boundaries of the window ###
-        win_xleft_low = np.uint(leftx_current - margin)  # Update this
-        win_xleft_high = np.uint(leftx_current + margin)  # Update this
+        win_xleft_low = np.clip(np.uint(leftx_current - margin), 0, imgIn.shape[1] - 1)  # Update this
+        win_xleft_high = np.clip(np.uint(leftx_current + margin), 0, imgIn.shape[1] - 1) # Update this
 
-        win_xright_low = np.uint(rightx_current - margin)  # Update this
-        win_xright_high = np.uint(rightx_current + margin)  # Update this
+        win_xright_low = np.clip(np.uint(rightx_current - margin), 0, imgIn.shape[1] - 1)  # Update this
+        win_xright_high = np.clip(np.uint(rightx_current + margin), 0, imgIn.shape[1] - 1)  # Update this
 
         # Draw the windows on the visualization image
         cv2.rectangle(out_img, (win_xleft_low, win_y_low),
@@ -198,34 +207,77 @@ def fitPolynomial(imgIn):
     leftx, lefty, rightx, righty, out_img = findLanePixels(imgIn)
 
     # Fit a second order polynomial to each using `np.polyfit` ###
-    left_fit = np.polyfit(lefty, leftx, 2)
-    right_fit = np.polyfit(righty, rightx, 2)
-
-    # Generate x and y values for plotting
     ploty = np.linspace(0, imgIn.shape[0] - 1, imgIn.shape[0])
-    try:
+    if (not len(lefty)) <= 0 and (not len(leftx) <= 0):
+        left_fit = np.polyfit(lefty, leftx, 2)
         left_fitx = left_fit[0] * ploty ** 2 + left_fit[1] * ploty + left_fit[2]
+        out_img[lefty, leftx] = [255, 0, 0]
+    if (not len(righty)) <= 0 and (not len(rightx) <= 0):
+        right_fit = np.polyfit(righty, rightx, 2)
         right_fitx = right_fit[0] * ploty ** 2 + right_fit[1] * ploty + right_fit[2]
-    except TypeError:
-        # Avoids an error if `left` and `right_fit` are still none or incorrect
-        print('The function failed to fit a line!')
-        left_fitx = 1 * ploty ** 2 + 1 * ploty
-        right_fitx = 1 * ploty ** 2 + 1 * ploty
+        out_img[righty, rightx] = [0, 0, 255]
 
-    ## Visualization ##
-    # Colors in the left and right lane regions
-    out_img[lefty, leftx] = [255, 0, 0]
-    out_img[righty, rightx] = [0, 0, 255]
+    # Generate an overlay with the fitted ploynoms
+    xdim_overlay = np.int32(max([max(left_fitx), max(right_fitx), imgIn.shape[1]]))
+    ydim_overlay = np.int32(imgIn.shape[0])
+    lineOverlay = np.uint8(np.zeros([imgIn.shape[0], imgIn.shape[1]]))
 
-    # Plots the left and right polynomials on the lane lines
-    #plt.plot(left_fitx, ploty, color='yellow')
-    #plt.plot(right_fitx, ploty, color='yellow')
+    for ii in zip(np.int32(ploty), np.int32(right_fitx)):
+        if ii[1] < imgIn.shape[1]:
+            out_img[ii] = [255, 255, 0]
+            lineOverlay[ii] = 1
+    for ii in zip(np.int32(ploty), np.int32(left_fitx)):
+        if ii[1] < imgIn.shape[1]:
+            out_img[ii] = [255, 255, 0]
+            lineOverlay[ii] = 1
 
-    for ii in range(len(ploty)):
-        out_img[np.int32(ploty), np.int32(right_fitx), :] = [255, 255, 0]
-        out_img[np.int32(ploty), np.int32(left_fitx), :] = [255, 255, 0]
+    return out_img, left_fit, right_fit, ploty, lineOverlay
 
-    return out_img
+def measureCurvature(ploty, left_fit, right_fit):
+    '''
+    Calculates the curvature of polynomial functions in pixels.
+    '''
+    # Define conversions in x and y from pixels space to meters
+    ym_per_pix = 30 / 720  # meters per pixel in y dimension
+    xm_per_pix = 3.7 / 700  # meters per pixel in x dimension
+
+    # Define y-value where we want radius of curvature
+    # We'll choose the maximum y-value, corresponding to the bottom of the image
+    y_eval = np.max(ploty)
+
+    ##### TO-DO: Implement the calculation of R_curve (radius of curvature) #####
+    left_curverad = 0
+    right_curverad = 0
+    if not len(left_fit) <= 0:
+        #left_curverad = ((1 + (2 * left_fit[0] * y_eval + left_fit[1]) ** 2) ** 1.5) / np.absolute(2 * left_fit[0])
+        left_curverad = ((1 + (2 * left_fit[0] * ym_per_pix * y_eval + left_fit[1]) ** 2) ** 1.5) / np.absolute(2 * left_fit[0])
+    if not len(right_fit) <= 0:
+        #right_curverad = ((1 + (2 * right_fit[0] * y_eval + right_fit[1]) ** 2) ** 1.5) / np.absolute(2 * right_fit[0])
+        right_curverad = ((1 + (2 * right_fit[0] * ym_per_pix * y_eval + right_fit[1]) ** 2) ** 1.5) / np.absolute(2 * right_fit[0])
+
+    return left_curverad, right_curverad
+
+def get_car_x_offset(dim, left_fit, right_fit):
+    xm_per_pix = 3.7 / 700  # meters per pixel in x dimension
+    ymax = dim[0]
+    xmax = dim[1]
+
+    if (not len(ploty)) <= 0 and (not len(left_fit) <= 0):
+        left_line_point = left_fit[0] * (ymax - 1) ** 2 + left_fit[1] * (ymax - 1) + left_fit[2]
+
+    if (not len(ploty)) <= 0 and (not len(right_fit) <= 0):
+        right_line_point = right_fit[0] * (ymax - 1) ** 2 + right_fit[1] * (ymax - 1) + right_fit[2]
+
+    x_offset = xm_per_pix * (((right_line_point + left_line_point) // 2) - (xmax // 2))
+    return x_offset
+
+def weighted_img(img, initial_img, α=0.8, β=1., γ=0.):
+    return cv2.addWeighted(initial_img, α, img, β, γ)
+
+
+
+
+
 
 if __name__ == "__main__":
 
@@ -245,12 +297,27 @@ if __name__ == "__main__":
         binaryImg = getBinaryImg(currentUndisImg)
 
         # Get warped image, ROI is a trapezoid
-        warpedBinaryImg = perspectiveTransform(binaryImg)
+        transformationMatrix, invTransformationMatrix = getMatrices(binaryImg)
+        warpedBinaryImg = perspectiveTransform(binaryImg, transformationMatrix)
 
-        # Fit lane lines
-        highlightedImg = fitPolynomial(warpedBinaryImg)
+        # Fit lane lines by fitting 2nd oder polynomial
+        highlightedImg, left_fit, right_fit, ploty, lineOverlayWarped = fitPolynomial(warpedBinaryImg)
+
+        # Get the curvature of each lane line
+        left_curverad, right_curverad = measureCurvature(ploty, left_fit, right_fit)
+        print(currentTestImgfile + ': curvature left [m] = ' + str(left_curverad) + '   curvature right [m] = ' + str(right_curverad))
+
+        # Get cars x offset
+        x_offset = get_car_x_offset(warpedBinaryImg.shape, left_fit, right_fit)
+        print(currentTestImgfile + ' delta x of car to lane center [m] = ' + str(x_offset))
+
+        # Unwarp the line overlay we fond
+        UnwarpedOverlay = perspectiveTransform(lineOverlayWarped, invTransformationMatrix)
+        UnwarpedImgOut = weighted_img(currentUndisImg, cv2.cvtColor(UnwarpedOverlay*255, cv2.COLOR_GRAY2BGR))
+        UnwarpedImgOut = cv2.cvtColor(UnwarpedOverlay*255, cv2.COLOR_GRAY2BGR)
 
         cv2.imwrite('output_images/' + 'undis_' + currentTestImgfile, currentUndisImg)
         cv2.imwrite('output_images/' + 'bin_' + currentTestImgfile, binaryImg * 255)
         cv2.imwrite('output_images/' + 'warp_' + currentTestImgfile, warpedBinaryImg * 255)
         cv2.imwrite('output_images/' + 'highlightet_' + currentTestImgfile, highlightedImg)
+        cv2.imwrite('output_images/' + 'highlightet_unwarped_' + currentTestImgfile, UnwarpedImgOut)
