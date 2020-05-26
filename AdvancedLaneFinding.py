@@ -23,16 +23,20 @@ def calibrateCam(imgPath, nx=9, ny=6):
     objpoints = []  # 3d point in real world space
     imgpoints = []  # 2d points in image plane.
 
+    ChessboardImages = []
     for currentFile in CalibrationImageFiles:
         # check if filetype if jpg
         if not currentFile.endswith('jpg'):
             continue
         # read image and get grayscale image
         currentImageIn = cv2.imread(imgPath + currentFile)
+        ChessboardImages.append((currentImageIn, currentFile))
         gray = cv2.cvtColor(currentImageIn, cv2.COLOR_BGR2GRAY)
 
         # find chessboard corners
         ret, corners = cv2.findChessboardCorners(gray, (nx, ny), None)
+        #cv2.drawChessboardCorners(currentImageIn, (nx, ny), corners, ret)
+
 
         # add corners and world points and save image with highlighted corners:
         if ret == True:
@@ -43,20 +47,25 @@ def calibrateCam(imgPath, nx=9, ny=6):
             # cv2.imwrite('output_images/' + 'output_' + currentFile, currentImageOut)
 
     ret, mtx, dist, rvecs, tvecs = cv2.calibrateCamera(objpoints, imgpoints, gray.shape[::-1], None, None)
-    debugPrint('Camera matrix: ' + str(mtx))
-    debugPrint('Distorion parameters: ' + str(dist))
+
+    for CurentChessboardImg in ChessboardImages:
+
+        cv2.imwrite('output_images/' + 'out_dis_' + CurentChessboardImg[1], CurentChessboardImg[0])
+
+        undisChessboard = cv2.undistort(CurentChessboardImg[0], mtx, dist, None, mtx)
+        cv2.imwrite('output_images/' + 'out_undis_' + CurentChessboardImg[1], undisChessboard)
 
     return mtx, dist
 
 def undistortImage(rawImage, mtx, dist):
-    undistImg = currentImageOut = cv2.undistort(rawImage, mtx, dist, None, mtx)
+    undistImg = cv2.undistort(rawImage, mtx, dist, None, mtx)
     return undistImg
 
 def getBinaryImg(imgIn):
-    threshold_sobel_min = 30
+    threshold_sobel_min = 50
     threshold_sobel_max = 100
 
-    threshold_saturation_min = 150
+    threshold_saturation_min = 80
     threshold_saturation_max = 255
 
     # Do color transform and get S channel
@@ -87,8 +96,8 @@ def getMatrices(shape = (720, 1280)):
 
     # set source and destination points for the perspective transform
     x_magin_bottom = 0.2 * xsize / 2
-    x_magin_top = 0.85 * xsize / 2
-    y_hight = 0.6 * ysize
+    x_magin_top = 0.82 * xsize / 2
+    y_hight = 0.65 * ysize
     src = np.array([
         [0, ysize - 1],
         [xsize - 1, ysize - 1],
@@ -100,6 +109,9 @@ def getMatrices(shape = (720, 1280)):
         [xsize - 1, ysize - 1],
         [xsize - 1, 0],
         [0, 0]], dtype="float32")
+
+    debugPrint('Source points for perspective transformation: ' + str(src))
+    debugPrint('Destination points for perspective transformation: ' + str(dst))
 
     # Get transform matrix and warp image
     transformationMatrix = cv2.getPerspectiveTransform(src, dst)
@@ -116,7 +128,7 @@ def perspectiveTransform(imgIn, transformationMatrix):
 
     return warped
 
-def findLanePixels(imgIn):
+def findLinePixelsSlidingWindow(imgIn):
     # Take a histogram of the bottom half of the image
     histogram = np.sum(imgIn[imgIn.shape[0] // 2:, :], axis=0)
     # Create an output image to draw on and visualize the result
@@ -200,22 +212,55 @@ def findLanePixels(imgIn):
     rightx = nonzerox[right_lane_inds]
     righty = nonzeroy[right_lane_inds]
 
+    # Highlight all line pixels
+    out_img[righty, rightx] = [0, 0, 255]
+    out_img[lefty, leftx] = [255, 0, 0]
+
     return leftx, lefty, rightx, righty, out_img
 
-def fitPolynomial(imgIn):
-    # Find our lane pixels first
-    leftx, lefty, rightx, righty, out_img = findLanePixels(imgIn)
+def findLinePixelsPreviousFit(imgIn, left_fit, right_fit):
+    # Create an output image to draw on and visualize the result
+    out_img = np.dstack((imgIn, imgIn, imgIn))
 
+    margin = 100
+
+    # Grab activated pixels
+    nonzero = imgIn.nonzero()
+    nonzeroy = np.array(nonzero[0])
+    nonzerox = np.array(nonzero[1])
+
+    left_lane_inds = (nonzerox >= (left_fit[0] * (nonzeroy ** 2) + left_fit[1] * nonzeroy + left_fit[2] - margin)) \
+                     & (nonzerox < (left_fit[0] * (nonzeroy ** 2) + left_fit[1] * nonzeroy + left_fit[2] + margin))
+
+    right_lane_inds = (nonzerox >= (right_fit[0] * (nonzeroy ** 2) + right_fit[1] * nonzeroy + right_fit[2] - margin)) \
+                      & (nonzerox < (right_fit[0] * (nonzeroy ** 2) + right_fit[1] * nonzeroy + right_fit[2] + margin))
+
+    # Again, extract left and right line pixel positions
+    leftx = nonzerox[left_lane_inds]
+    lefty = nonzeroy[left_lane_inds]
+    rightx = nonzerox[right_lane_inds]
+    righty = nonzeroy[right_lane_inds]
+
+    # Highlight all line pixels
+    out_img[righty, rightx] = [0, 0, 255]
+    out_img[lefty, leftx] = [255, 0, 0]
+
+    return leftx, lefty, rightx, righty, out_img
+
+def fitPolynomial(shape, leftx, lefty, rightx, righty):
+
+    left_fit  = []
+    right_fit = []
     # Fit a second order polynomial to each using `np.polyfit` ###
-    ploty = np.linspace(0, imgIn.shape[0] - 1, imgIn.shape[0])
+    ploty = np.linspace(0, shape[0] - 1, shape[0])
     if (not len(lefty)) <= 0 and (not len(leftx) <= 0):
         left_fit = np.polyfit(lefty, leftx, 2)
         #left_fitx = left_fit[0] * ploty ** 2 + left_fit[1] * ploty + left_fit[2]
-        out_img[lefty, leftx] = [255, 0, 0]
+        #out_img[lefty, leftx] = [255, 0, 0]
     if (not len(righty)) <= 0 and (not len(rightx) <= 0):
         right_fit = np.polyfit(righty, rightx, 2)
         #right_fitx = right_fit[0] * ploty ** 2 + right_fit[1] * ploty + right_fit[2]
-        out_img[righty, rightx] = [0, 0, 255]
+        #out_img[righty, rightx] = [0, 0, 255]
 
     # Generate an overlay with the fitted ploynoms
     #xdim_overlay = np.int32(max([max(left_fitx), max(right_fitx), imgIn.shape[1]]))
@@ -231,7 +276,21 @@ def fitPolynomial(imgIn):
             out_img[ii] = [255, 255, 0]
     '''''''''
 
-    return left_fit, right_fit, out_img
+    return left_fit, right_fit
+
+def drawPolynomial(imgIn, left_fit, right_fit):
+    ploty = np.linspace(0, imgIn.shape[0] - 1, imgIn.shape[0])
+    # not empty check!!!
+    left_fitx = left_fit[0] * ploty ** 2 + left_fit[1] * ploty + left_fit[2]
+    right_fitx = right_fit[0] * ploty ** 2 + right_fit[1] * ploty + right_fit[2]
+
+    left_xypoints = (np.asarray([left_fitx, ploty]).T).astype(np.int32)
+    right_xypoints = (np.asarray([right_fitx, ploty]).T).astype(np.int32)
+
+    cv2.polylines(imgIn, [left_xypoints], False, (255, 255, 255))
+    cv2.polylines(imgIn, [right_xypoints], False, (255, 255, 255))
+
+    return  imgIn
 
 def drawLane(imgIn, left_fit, right_fit, invTransformationMatrix):
 
@@ -265,7 +324,7 @@ def drawLane(imgIn, left_fit, right_fit, invTransformationMatrix):
     pts_left = np.array([np.transpose(np.vstack([left_fitx, ploty]))])
     pts_right = np.array([np.flipud(np.transpose(np.vstack([right_fitx, ploty])))])
     pts = np.hstack((pts_left, pts_right))
-    cv2.fillPoly(laneMaskWarped, np.int_([pts]), (0,255,0))
+    cv2.fillPoly(laneMaskWarped, np.int_([pts]), (0,255,255))
     laneMask = perspectiveTransform(laneMaskWarped, invTransformationMatrix)
     #imgIn[np.nonzero(laneMask)] = [0,255,0]
 
@@ -294,7 +353,7 @@ def measureCurvature(ymax, left_fit, right_fit):
 
     return left_curverad, right_curverad
 
-def get_car_x_offset(dim, left_fit, right_fit):
+def getCarX_offset(dim, left_fit, right_fit):
     xm_per_pix = 3.7 / 700  # meters per pixel in x dimension
     ymax = dim[0]
     xmax = dim[1]
@@ -312,47 +371,11 @@ def weighted_img(img, initial_img, α=0.8, β=1., γ=0.):
     return cv2.addWeighted(initial_img, α, img, β, γ)
 
 
-# Set all values which are defined only once as global variables
-
-# Do calibration: Get distortion parameters and camera matrix
-mtx, dist = calibrateCam('camera_cal/')
-transformationMatrix, invTransformationMatrix = getMatrices()  # GLOBAL!!!!
-
-def processImage(imgIn, isSingleImage=False):
-    currentUndisImg = undistortImage(imgIn, mtx, dist)
-
-    # Get gradient binary image
-    binaryImg = getBinaryImg(currentUndisImg)
-
-    # Get warped image, ROI is a trapezoid
-    warpedBinaryImg = perspectiveTransform(binaryImg, transformationMatrix)
-
-    # Fit lane lines by fitting 2nd oder polynomial
-    left_fit, right_fit, highlightedWarpedImg = fitPolynomial(warpedBinaryImg)
-
-    # Get the curvature of each lane line
-    left_curverad, right_curverad = measureCurvature(warpedBinaryImg.shape[1], left_fit, right_fit)
-
-    # Get cars x offset
-    x_offset = get_car_x_offset(warpedBinaryImg.shape, left_fit, right_fit)
-
-    # Unwarp the line mask we fond
-    ImgOut = drawLane(currentUndisImg, left_fit, right_fit, invTransformationMatrix)
-
-    # Print out some parameters and also save all intermediate steps of the pipeline if function used on singel imgs
-    if isSingleImage == True:
-        print(currentTestImgfile + ': curvature left [m] = ' + str(left_curverad) + '   curvature right [m] = ' + str(
-            right_curverad))
-        print(currentTestImgfile + ' delta x of car to lane center [m] = ' + str(x_offset))
-        cv2.imwrite('output_images/' + 'undis_' + currentTestImgfile, currentUndisImg)
-        cv2.imwrite('output_images/' + 'bin_' + currentTestImgfile, binaryImg * 255)
-        cv2.imwrite('output_images/' + 'warp_' + currentTestImgfile, warpedBinaryImg * 255)
-        cv2.imwrite('output_images/' + 'highlightet_' + currentTestImgfile, highlightedWarpedImg)
-        cv2.imwrite('output_images/' + 'out_' + currentTestImgfile, ImgOut)
-
-    return ImgOut
-
 if __name__ == "__main__":
+
+    # Do calibration: Get distortion parameters and camera matrix
+    mtx, dist = calibrateCam('camera_cal/')
+    transformationMatrix, invTransformationMatrix = getMatrices()
 
     testImgFiles = os.listdir('test_images/')
     for currentTestImgfile in testImgFiles:
@@ -361,4 +384,35 @@ if __name__ == "__main__":
             continue
 
         currentTestImg = cv2.imread('test_images/' + currentTestImgfile)
-        processImage(currentTestImg, True)
+
+        # undistort the image
+        currentUndisImg = undistortImage(currentTestImg, mtx, dist)
+        cv2.imwrite('output_images/' + 'undis_' + currentTestImgfile, currentUndisImg)
+        # Get gradient binary image
+        binaryImg = getBinaryImg(currentUndisImg)
+        cv2.imwrite('output_images/' + 'bin_' + currentTestImgfile, binaryImg * 255)
+        # Get warped image, ROI is a trapezoid
+        warpedBinaryImg = perspectiveTransform(binaryImg, transformationMatrix)
+        warpedUndisImg = perspectiveTransform(currentUndisImg, transformationMatrix)
+        cv2.imwrite('output_images/' + 'warp_' + currentTestImgfile, warpedBinaryImg * 255)
+        cv2.imwrite('output_images/' + 'birdseye_' + currentTestImgfile, warpedUndisImg)
+        # Fit lane lines by finding relevant pixel with sliding windows and fitting 2nd oder polynomial
+        leftx, lefty, rightx, righty, highlightedWarpedImg = findLinePixelsSlidingWindow(warpedBinaryImg)
+        left_fit, right_fit = fitPolynomial(warpedBinaryImg.shape, leftx, lefty, rightx, righty)
+        highlightedWarpedImg = drawPolynomial(highlightedWarpedImg, left_fit, right_fit)
+        cv2.imwrite('output_images/' + 'highlightet_' + currentTestImgfile, highlightedWarpedImg)
+        # Get the curvature of each lane line
+        left_curverad, right_curverad = measureCurvature(warpedBinaryImg.shape[1], left_fit, right_fit)
+        # Get cars x offset
+        x_offset = getCarX_offset(warpedBinaryImg.shape, left_fit, right_fit)
+        # Unwarp the line mask we fond
+        ImgOut = drawLane(currentUndisImg, left_fit, right_fit, invTransformationMatrix)
+        # annotate the img with curvature and delta x
+        cv2.putText(ImgOut, "L. Curvature: %.2f km" % (left_curverad / 1000), (50, 50), cv2.FONT_HERSHEY_DUPLEX, 1,
+                    (255, 255, 255), 2)
+        cv2.putText(ImgOut, "R. Curvature: %.2f km" % (right_curverad / 1000), (50, 80), cv2.FONT_HERSHEY_DUPLEX, 1,
+                    (255, 255, 255), 2)
+        cv2.putText(ImgOut, "Offset to lane center: %.2f m" % x_offset, (50, 110), cv2.FONT_HERSHEY_DUPLEX, 1,
+                    (255, 255, 255), 2)
+        # save the final result
+        cv2.imwrite('output_images/' + 'out_' + currentTestImgfile, ImgOut)
